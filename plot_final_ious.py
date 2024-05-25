@@ -18,16 +18,24 @@ def main(work_dirs_dir='work_dirs'):
             lines = f.readlines()
         lines = [json.loads(line) for line in lines]
         val_lines = [line['mIoU'] for line in lines if 'mIoU' in line]
-        entries[work_dir] = max(val_lines)
+        if len(val_lines):
+            entries[work_dir] = max(val_lines)
+
+    plt.figure()
 
     knet_entries = {k: v for k, v in entries.items() if 'knet' in k}
     ds_entries = {(int(k.split('ds')[1].split('-')[0]) if 'ds' in k else 1): v for k, v in knet_entries.items()}
     sorted_entries = dict(sorted(ds_entries.items(), key=lambda item: item[0], reverse=True))
+    plt.plot(np.log2(list(sorted_entries.keys())), sorted_entries.values(), '-o', label='knet')
 
-    plt.figure()
-    plt.plot(np.log2(list(sorted_entries.keys())), sorted_entries.values())
+    dinov2_entries = {k: v for k, v in entries.items() if 'dinov2' in k}
+    ds_entries = {(int(k.split('ds')[1].split('_')[0]) if 'ds' in k else 1): v for k, v in dinov2_entries.items()}
+    sorted_entries = dict(sorted(ds_entries.items(), key=lambda item: item[0], reverse=True))
+    plt.plot(np.log2(list(sorted_entries.keys())), sorted_entries.values(), '-o', label='dinov2')
+
     plt.ylabel('mIoU')
     plt.xlabel('$\log_2$(dataset downsampling factor)')
+    plt.legend()
     plt.savefig('ious.png')
 
 if __name__ == '__main__':
