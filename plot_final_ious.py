@@ -23,15 +23,11 @@ def main(work_dirs_dir='work_dirs'):
 
     plt.figure()
 
-    knet_entries = {k: v for k, v in entries.items() if 'knet' in k}
-    ds_entries = {(int(k.split('ds')[1].split('-')[0]) if 'ds' in k else 1): v for k, v in knet_entries.items()}
-    sorted_entries = dict(sorted(ds_entries.items(), key=lambda item: item[0], reverse=True))
-    plt.plot(np.log2(list(sorted_entries.keys())), sorted_entries.values(), '-o', label='knet')
-
-    dinov2_entries = {k: v for k, v in entries.items() if 'dinov2' in k}
-    ds_entries = {(int(k.split('ds')[1].split('_')[0]) if 'ds' in k else 1): v for k, v in dinov2_entries.items()}
-    sorted_entries = dict(sorted(ds_entries.items(), key=lambda item: item[0], reverse=True))
-    plt.plot(np.log2(list(sorted_entries.keys())), sorted_entries.values(), '-o', label='dinov2')
+    for model_name in ['knet', 'dinov2_vits14_', 'dinov2_vitb14_', 'dinov2_vitb14reg']:
+        model_entries = {k: v for k, v in entries.items() if model_name in k}
+        ds_entries = {(int(k.split('ds')[1].split('-')[0].split('_')[0]) if 'ds' in k else 1): v for k, v in model_entries.items()}
+        sorted_entries = dict(sorted(ds_entries.items(), key=lambda item: item[0], reverse=True))
+        plt.plot(np.log2(list(sorted_entries.keys())), sorted_entries.values(), '-o', label=model_name)
 
     plt.ylabel('mIoU')
     plt.xlabel('$\log_2$(dataset downsampling factor)')
