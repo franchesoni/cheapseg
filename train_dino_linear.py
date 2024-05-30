@@ -1,6 +1,7 @@
 print("importing standard...")
 import time
 from pathlib import Path
+import subprocess
 
 print("importing external...")
 import torch
@@ -8,6 +9,7 @@ import numpy as np
 from fire import Fire
 from PIL import Image
 from cv2 import cvtColor, COLOR_RGB2HSV, COLOR_HSV2RGB
+from torch.utils.tensorboard import SummaryWriter
 
 
 print("done importing.")
@@ -173,11 +175,6 @@ class ADE20K(torch.utils.data.Dataset):
                 mode="constant",
                 constant_values=255,
             )
-        if (img.shape[:2] != (self.crop_size, self.crop_size)) or (
-            ann.shape[:2] != (self.crop_size, self.crop_size)
-        ):
-            breakpoint()
-
         return img.astype(np.float32), ann.astype(np.int64)
 
 
@@ -206,8 +203,27 @@ def main(
     seed=0,
     device="cuda",
 ):
+    # set device
     if (not device.startswith("cuda")) or (not torch.cuda.is_available()):
         device = "cpu"
+    # set logger
+    writer = SummaryWriter()  # for visualization
+    logfile = Path(f"{writer.log_dir}/{time.time()}.log")
+    logfile.parent.mkdir(exist_ok=True)
+    logfile.touch()  # create log file for record
+    log_so_far = ""
+
+    def update_log_file(iter_n, flush_every=50, force=False):
+        if force or (iter_n and (iter_n % flush_every == 0)):
+            with open(logfile, "w") as f:
+                f.write(log_so_far)
+
+    # log metadata
+    current_git_hash = subprocess.check_output(["git", "rev-parse", "HEAD"]).strip()
+    current_args = locals()
+    log_so_far += f"Git hash: {current_git_hash}\n"
+    log_so_far += f"Command line arguments: {current_args}\n"
+    update_log_file(0, force=True)
     # seed
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -238,6 +254,7 @@ def main(
             model.eval()
             with torch.no_grad():
                 val_loss = 0
+                print("Validating...")
                 for val_sample in ds_val:
                     img, ann = val_sample
                     img, ann = img.to(device, non_blocking=True), ann.to(
@@ -252,8 +269,16 @@ def main(
                         output, ann, reduction="none", ignore_index=255
                     )
                     val_loss += loss.sum() / ann.numel()
-                print(f"Iteration {iter_n}/{iters}, Validation loss: {val_loss.item()}")
+                # log
+                val_log_line = (
+                    f"Iteration {iter_n}/{iters}, Validation loss: {val_loss.item()}"
+                )
+                print(val_log_line)
+                log_so_far += val_log_line + "\n"
+                update_log_file(iter_n, force=True)
+                writer('loss/val', val_loss.item(), iter_n)
             model.train()
+        update_log_file(iter_n)
         # prepare data
         img, ann = sample
         img, ann = img.to(device, non_blocking=True), ann.to(device, non_blocking=True)
@@ -273,21 +298,25 @@ def main(
         optim.step()
         scheduler.step()
         # log
+        writer.add_scalar("loss/train", loss.item(), iter_n)
+        train_log_line = f"Iteration {iter_n}/{iters}, loss: {loss.item()}, speed {iter_n / (time.time()-st)}it/s"
         print(
-            f"Iteration {iter_n}/{iters}, loss: {loss.item()}, speed {iter_n / (time.time()-st)}it/s",
+            train_log_line,
             end="\r",
         )
+        log_so_far += train_log_line + "\n"
 
         if iter_n == iters - 1:
             break
         else:
             iter_n += 1
 
-    for _ in range(10):
-        img, ann = ds[0]
-        Image.fromarray(img).save("aimg.png")
-        Image.fromarray(ann).save("aann.png")
-        breakpoint()
+    # we're missing: 
+        # - completed flag
+        # - saving val models
+        # - saving a snapshot to resume training
+        # - logging the learning rate
+        # - computing the mIoU in validation
 
 
 if __name__ == "__main__":
