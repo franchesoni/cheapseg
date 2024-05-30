@@ -51,6 +51,18 @@ class ADE20K(torch.utils.data.Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
+        try:
+            torch_seed = torch.get_rng_state()
+            np_seed = np.random.get_state()
+            return self.getitem(idx)
+        except Exception as e:
+            print('Failed to get item', idx, self.split)
+            print('torch seed', torch_seed)
+            print('np seed', np_seed)
+            print('Error:', e)
+            return self.__getitem__(idx+1)
+    
+    def getitem(self, idx):
         img_path, ann_path = self.samples[idx]
         img = Image.open(img_path).convert("RGB")
         ann = Image.open(ann_path)
