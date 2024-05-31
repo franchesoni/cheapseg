@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 
 print("importing external...")
+import tqdm
 import torch
 import numpy as np
 from fire import Fire
@@ -13,6 +14,47 @@ from torch.utils.tensorboard import SummaryWriter
 
 
 print("done importing.")
+
+
+def intersect_and_union(pred_label: torch.tensor, label: torch.tensor,
+                        num_classes: int, ignore_index: int):
+    """Calculate Intersection and Union.
+
+    Args:
+        pred_label (torch.tensor): Prediction segmentation map
+            or predict result filename. The shape is (H, W).
+        label (torch.tensor): Ground truth segmentation map
+            or label filename. The shape is (H, W).
+        num_classes (int): Number of categories.
+        ignore_index (int): Index that will be ignored in evaluation.
+
+    Returns:
+        torch.Tensor: The intersection of prediction and ground truth
+            histogram on all classes.
+        torch.Tensor: The union of prediction and ground truth histogram on
+            all classes.
+        torch.Tensor: The prediction histogram on all classes.
+        torch.Tensor: The ground truth histogram on all classes.
+    """
+
+    mask = (label != ignore_index)
+    pred_label = pred_label[mask]
+    label = label[mask]
+
+    intersect = pred_label[pred_label == label]
+    area_intersect = torch.histc(
+        intersect.float(), bins=(num_classes), min=0,
+        max=num_classes - 1).cpu()
+    area_pred_label = torch.histc(
+        pred_label.float(), bins=(num_classes), min=0,
+        max=num_classes - 1).cpu()
+    area_label = torch.histc(
+        label.float(), bins=(num_classes), min=0,
+        max=num_classes - 1).cpu()
+    area_union = area_pred_label + area_label - area_intersect
+    return area_intersect, area_union, area_pred_label, area_label
+
+
 
 
 class ADE20K(torch.utils.data.Dataset):
@@ -60,7 +102,7 @@ class ADE20K(torch.utils.data.Dataset):
             print('torch seed', torch_seed)
             print('np seed', np_seed)
             print('Error:', e)
-            return self.__getitem__(idx+1)
+            raise e
     
     def getitem(self, idx):
         img_path, ann_path = self.samples[idx]
@@ -263,12 +305,15 @@ def main(
     iter_n = 0
     for sample in dl:
         if iter_n and (iter_n % val_every == 0):
+            val_st = time.time()
             model.eval()
             with torch.no_grad():
                 val_loss = 0
                 print("Validating...")
-                for val_sample in ds_val:
+                intersections, unions = [], []
+                for val_sample in tqdm.tqdm(ds_val):
                     img, ann = val_sample
+                    img, ann = torch.from_numpy(img)[None], torch.from_numpy(ann)[None]
                     img, ann = img.to(device, non_blocking=True), ann.to(
                         device, non_blocking=True
                     )
@@ -281,14 +326,23 @@ def main(
                         output, ann, reduction="none", ignore_index=255
                     )
                     val_loss += loss.sum() / ann.numel()
+                    intersection, union, _, _ = intersect_and_union(
+                        torch.argmax(output[0], dim=0), ann[0], 150, 255
+                    )
+                    intersections.append(intersection)
+                    unions.append(union)
+                val_loss /= len(ds_val)
+                IoU_per_class = torch.stack(intersections).sum(0) / torch.stack(unions).sum(0)
+                mIoU = IoU_per_class.mean()
                 # log
                 val_log_line = (
-                    f"Iteration {iter_n}/{iters}, Validation loss: {val_loss.item()}"
+                    f"Iteration {iter_n}/{iters}, Validation loss: {val_loss.item()}, mIoU: {mIoU.item()}, val time: {time.time()-val_st}"
                 )
                 print(val_log_line)
                 log_so_far += val_log_line + "\n"
                 update_log_file(iter_n, force=True)
-                writer('loss/val', val_loss.item(), iter_n)
+                writer.add_scalar('loss/val', val_loss.item(), iter_n)
+                writer.add_scalar('mIoU/val', mIoU.item(), iter_n)
             model.train()
         update_log_file(iter_n)
         # prepare data
