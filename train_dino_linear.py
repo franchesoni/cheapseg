@@ -247,6 +247,18 @@ class DINOLinear(torch.nn.Module):
         return self.conv_seg(out)
 
 
+def should_early_stop(past_ious, patience):
+    if patience is None:
+        return False  # don't early stop
+    if len(past_ious) <= patience + 1:
+        return False  # not enough data yet
+    # our patience runs out if the last (patience+1) datapoints do not improve a previous max
+    prev_best_iou = max(past_ious[:-(patience+1)])
+    recent_best_iou = max(past_ious[-(patience+1):])
+    if recent_best_iou < prev_best_iou:
+        return True
+    return False
+
 def main(
     ds_path,
     model_name="dinov2_vitb14_reg",
@@ -256,6 +268,7 @@ def main(
     val_every=2000,
     seed=0,
     device="cuda",
+    patience=None
 ):
     # set device
     if (not device.startswith("cuda")) or (not torch.cuda.is_available()):
@@ -303,86 +316,99 @@ def main(
 
     st = time.time()
     iter_n = 0
-    for sample in dl:
-        if iter_n and (iter_n % val_every == 0):
-            val_st = time.time()
-            model.eval()
-            with torch.no_grad():
-                val_loss = 0
-                print("Validating...")
-                intersections, unions = [], []
-                for val_sample_ind in tqdm.tqdm(range(len(ds_val))):
-                    img, ann = ds_val[val_sample_ind]
-                    img, ann = torch.from_numpy(img)[None], torch.from_numpy(ann)[None]
-                    img, ann = img.to(device, non_blocking=True), ann.to(
-                        device, non_blocking=True
+    past_ious, finish = [], False
+    while not finish:
+        for sample in dl:
+            if iter_n and (iter_n % val_every == 0):
+                val_st = time.time()
+                model.eval()
+                with torch.no_grad():
+                    val_loss = 0
+                    print("Validating...")
+                    intersections, unions = [], []
+                    for val_sample_ind in tqdm.tqdm(range(len(ds_val))):
+                        img, ann = ds_val[val_sample_ind]
+                        img, ann = torch.from_numpy(img)[None], torch.from_numpy(ann)[None]
+                        img, ann = img.to(device, non_blocking=True), ann.to(
+                            device, non_blocking=True
+                        )
+                        img = img.permute(0, 3, 1, 2)
+                        output = model(img)
+                        output = torch.nn.functional.interpolate(
+                            output, size=ann.shape[1:], mode="bilinear"
+                        )
+                        loss = torch.nn.functional.cross_entropy(
+                            output, ann, reduction="none", ignore_index=255
+                        )
+                        val_loss += loss.sum() / ann.numel()
+                        intersection, union, _, _ = intersect_and_union(
+                            torch.argmax(output[0], dim=0), ann[0], 150, 255
+                        )
+                        intersections.append(intersection)
+                        unions.append(union)
+                    val_loss /= len(ds_val)
+                    IoU_per_class = torch.stack(intersections).sum(0) / torch.stack(unions).sum(0)
+                    mIoU = IoU_per_class.mean()
+                    past_ious.append(mIoU.item())
+                    early_stop_now = should_early_stop(past_ious, patience)
+                    # log
+                    val_log_line = (
+                        f"Iteration {iter_n}/{iters}, Validation loss: {val_loss.item()}, mIoU: {mIoU.item()}, val time: {time.time()-val_st}"
                     )
-                    img = img.permute(0, 3, 1, 2)
-                    output = model(img)
-                    output = torch.nn.functional.interpolate(
-                        output, size=ann.shape[1:], mode="bilinear"
-                    )
-                    loss = torch.nn.functional.cross_entropy(
-                        output, ann, reduction="none", ignore_index=255
-                    )
-                    val_loss += loss.sum() / ann.numel()
-                    intersection, union, _, _ = intersect_and_union(
-                        torch.argmax(output[0], dim=0), ann[0], 150, 255
-                    )
-                    intersections.append(intersection)
-                    unions.append(union)
-                val_loss /= len(ds_val)
-                IoU_per_class = torch.stack(intersections).sum(0) / torch.stack(unions).sum(0)
-                mIoU = IoU_per_class.mean()
-                # log
-                val_log_line = (
-                    f"Iteration {iter_n}/{iters}, Validation loss: {val_loss.item()}, mIoU: {mIoU.item()}, val time: {time.time()-val_st}"
-                )
-                print(val_log_line)
-                log_so_far += val_log_line + "\n"
-                update_log_file(iter_n, force=True)
-                writer.add_scalar('loss/val', val_loss.item(), iter_n)
-                writer.add_scalar('mIoU/val', mIoU.item(), iter_n)
-            model.train()
-        update_log_file(iter_n)
-        # prepare data
-        img, ann = sample
-        img, ann = img.to(device, non_blocking=True), ann.to(device, non_blocking=True)
-        img = img.permute(0, 3, 1, 2)
-        # forward
-        output = model(img)
-        output = torch.nn.functional.interpolate(
-            output, size=ann.shape[1:], mode="bilinear"
-        )
-        loss = torch.nn.functional.cross_entropy(
-            output, ann, reduction="none", ignore_index=255
-        )
-        loss = loss.sum() / ann.numel()
-        # backprop
-        optim.zero_grad()
-        loss.backward()
-        optim.step()
-        scheduler.step()
-        # log
-        writer.add_scalar("loss/train", loss.item(), iter_n)
-        train_log_line = f"Iteration {iter_n}/{iters}, loss: {loss.item()}, speed {iter_n / (time.time()-st)}it/s"
-        print(
-            train_log_line,
-            end="\r",
-        )
-        log_so_far += train_log_line + "\n"
+                    print(val_log_line)
+                    log_so_far += val_log_line + "\n"
+                    update_log_file(iter_n, force=True)
+                    writer.add_scalar('val_loss', val_loss.item(), iter_n)
+                    writer.add_scalar('val_mIoU', mIoU.item(), iter_n)
+                    if early_stop_now:
+                        print('Early stopping.')
+                        log_so_far += "Early stopped."
+                        update_log_file(iter_n, force=True)
+                        finish = True
+                        break
+                model.train()
+            update_log_file(iter_n)
+            # prepare data
+            img, ann = sample
+            img, ann = img.to(device, non_blocking=True), ann.to(device, non_blocking=True)
+            img = img.permute(0, 3, 1, 2)
+            # forward
+            output = model(img)
+            output = torch.nn.functional.interpolate(
+                output, size=ann.shape[1:], mode="bilinear"
+            )
+            loss = torch.nn.functional.cross_entropy(
+                output, ann, reduction="none", ignore_index=255
+            )
+            loss = loss.sum() / ann.numel()
+            # backprop
+            optim.zero_grad()
+            loss.backward()
+            optim.step()
+            scheduler.step()
+            # log
+            writer.add_scalar("train_loss", loss.item(), iter_n)
+            writer.add_scalar("lr", optim.param_groups[0]['lr'])
+            train_log_line = f"Iteration {iter_n}/{iters}, loss: {loss.item()}, speed {iter_n / (time.time()-st)}it/s"
+            print(
+                train_log_line,
+                end="\r",
+            )
+            log_so_far += train_log_line + "\n"
 
-        if iter_n == iters - 1:
-            break
-        else:
-            iter_n += 1
+            if iter_n == iters - 1:
+                finish = True
+                break
+            else:
+                iter_n += 1
+
+    # completed!
+    (Path(writer.log_dir) / 'completed').touch()  # write completed file
 
     # we're missing: 
-        # - completed flag
         # - saving val models
         # - saving a snapshot to resume training
         # - logging the learning rate
-        # - computing the mIoU in validation
 
 
 if __name__ == "__main__":
