@@ -311,8 +311,8 @@ def main(
                 val_loss = 0
                 print("Validating...")
                 intersections, unions = [], []
-                for val_sample in tqdm.tqdm(ds_val):
-                    img, ann = val_sample
+                for val_sample_ind in tqdm.tqdm(range(len(ds_val))):
+                    img, ann = ds_val[val_sample_ind]
                     img, ann = torch.from_numpy(img)[None], torch.from_numpy(ann)[None]
                     img, ann = img.to(device, non_blocking=True), ann.to(
                         device, non_blocking=True
