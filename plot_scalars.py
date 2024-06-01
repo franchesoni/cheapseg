@@ -1,7 +1,8 @@
+import numpy as np
 import json
 import matplotlib.pyplot as plt
 
-def main(scalars_path, out_path='scalars.png'):
+def main(scalars_path, out_path='scalars.png', log=False):
     with open(scalars_path, 'r') as f:
         lines = f.readlines()
 
@@ -18,6 +19,8 @@ def main(scalars_path, out_path='scalars.png'):
     plt.figure()
     fig, ax1 = plt.subplots()
 
+    if log:
+        train_losses = np.log(train_losses)
     ax1.plot(train_steps, train_losses, 'b-', label='train loss')
     ax1.set_xlabel('Steps')
     ax1.set_ylabel('Train Loss', color='b')
