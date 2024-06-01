@@ -98,10 +98,10 @@ class ADE20K(torch.utils.data.Dataset):
             np_seed = np.random.get_state()
             return self.getitem(idx)
         except Exception as e:
-            print('Failed to get item', idx, self.split)
             print('torch seed', torch_seed)
             print('np seed', np_seed)
             print('Error:', e)
+            print('Failed to get item', idx, self.split)
             raise e
     
     def getitem(self, idx):
@@ -111,6 +111,7 @@ class ADE20K(torch.utils.data.Dataset):
         original_shape = img.height, img.width
 
         if self.split == "training":
+            # resize with a random zoom factor
             zoom_factor = np.random.uniform(0.5, 2)
             img_shape = (
                 int(original_shape[0] * zoom_factor),
@@ -118,6 +119,7 @@ class ADE20K(torch.utils.data.Dataset):
             )
             img = img.resize((img_shape[1], img_shape[0]), Image.BILINEAR)
             ann = ann.resize((img_shape[1], img_shape[0]), Image.NEAREST)
+            # crop a square if possible
             if self.crop_size < img_shape[0] or self.crop_size < img_shape[1]:
                 for _ in range(10):
                     margin_h, margin_w = (
@@ -235,12 +237,23 @@ class ADE20K(torch.utils.data.Dataset):
 class DINOLinear(torch.nn.Module):
     def __init__(self, model_name):
         super(DINOLinear, self).__init__()
-        self.bbone = torch.hub.load("facebookresearch/dinov2", model_name)
         self.in_channels = 384 if "vits" in model_name else 768
         self.bn = torch.nn.SyncBatchNorm(self.in_channels)
         self.conv_seg = torch.nn.Conv2d(self.in_channels, 150, kernel_size=1)
 
+        # Freeze the backbone parameters
+        self.bbone = torch.hub.load("facebookresearch/dinov2", model_name)
+        for param in self.bbone.parameters():
+            param.requires_grad = False
+
+        # params for mean std normalization
+        mean = torch.tensor([123.675, 116.28, 103.53]).view(1, 3, 1, 1)
+        std = torch.tensor([58.395, 57.12, 57.375]).view(1, 3, 1, 1)
+        self.register_buffer('mean', mean)
+        self.register_buffer('std', std)
+
     def forward(self, x):
+        x = (x - self.mean) / self.std
         with torch.no_grad():
             out = self.bbone.get_intermediate_layers(x, n=4, reshape=True)[3]
         out = self.bn(out)
@@ -388,8 +401,9 @@ def main(
             scheduler.step()
             # log
             writer.add_scalar("train_loss", loss.item(), iter_n)
-            writer.add_scalar("lr", optim.param_groups[0]['lr'])
-            train_log_line = f"Iteration {iter_n}/{iters}, loss: {loss.item()}, speed {iter_n / (time.time()-st)}it/s"
+            current_lr = optim.param_groups[0]['lr']
+            writer.add_scalar("lr", current_lr, iter_n)
+            train_log_line = f"Iteration {iter_n}/{iters}, loss: {loss.item()}, lr: {current_lr}, speed: {iter_n / (time.time()-st)}it/s"
             print(
                 train_log_line,
                 end="\r",
