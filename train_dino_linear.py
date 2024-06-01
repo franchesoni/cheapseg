@@ -298,7 +298,7 @@ def main(
     ds = ADE20K(ds_path, split="train")
     ds_val = ADE20K(ds_path, split="val")
     dl = torch.utils.data.DataLoader(
-        ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
+        ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, persistent_workers=True
     )
     # set up model
     model = DINOLinear(model_name).to(device)
