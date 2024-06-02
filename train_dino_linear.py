@@ -1,4 +1,5 @@
 print("importing standard...")
+import traceback
 import time
 from pathlib import Path
 import subprocess
@@ -381,34 +382,41 @@ def main(
                         break
                 model.train()
             update_log_file(iter_n)
-            # prepare data
-            img, ann = sample
-            img, ann = img.to(device, non_blocking=True), ann.to(device, non_blocking=True)
-            img = img.permute(0, 3, 1, 2)
-            # forward
-            output = model(img)
-            output = torch.nn.functional.interpolate(
-                output, size=ann.shape[1:], mode="bilinear"
-            )
-            loss = torch.nn.functional.cross_entropy(
-                output, ann, reduction="none", ignore_index=255
-            )
-            loss = loss.sum() / ann.numel()
-            # backprop
-            optim.zero_grad()
-            loss.backward()
-            optim.step()
-            scheduler.step()
-            # log
-            writer.add_scalar("train_loss", loss.item(), iter_n)
-            current_lr = optim.param_groups[0]['lr']
-            writer.add_scalar("lr", current_lr, iter_n)
-            train_log_line = f"Iteration {iter_n}/{iters}, loss: {loss.item()}, lr: {current_lr}, speed: {iter_n / (time.time()-st)}it/s"
-            print(
-                train_log_line,
-                end="\r",
-            )
-            log_so_far += train_log_line + "\n"
+            try:
+                # prepare data
+                img, ann = sample
+                img, ann = img.to(device, non_blocking=True), ann.to(device, non_blocking=True)
+                img = img.permute(0, 3, 1, 2)
+                # forward
+                output = model(img)
+                output = torch.nn.functional.interpolate(
+                    output, size=ann.shape[1:], mode="bilinear"
+                )
+                loss = torch.nn.functional.cross_entropy(
+                    output, ann, reduction="none", ignore_index=255
+                )
+                loss = loss.sum() / ann.numel()
+                # backprop
+                optim.zero_grad()
+                loss.backward()
+                optim.step()
+                scheduler.step()
+                # log
+                writer.add_scalar("train_loss", loss.item(), iter_n)
+                current_lr = optim.param_groups[0]['lr']
+                writer.add_scalar("lr", current_lr, iter_n)
+                train_log_line = f"Iteration {iter_n}/{iters}, loss: {loss.item()}, lr: {current_lr}, speed: {iter_n / (time.time()-st)}it/s"
+                print(
+                    train_log_line,
+                    end="\r",
+                )
+                log_so_far += train_log_line + "\n"
+            except RuntimeError as e:
+                print(f'runtime error at iter {iter_n}: {e}')
+                traceback.print_exc()
+                breakpoint()
+
+
 
             if iter_n == iters - 1:
                 finish = True
