@@ -1,11 +1,14 @@
 print("importing standard...")
 import pickle
+import shutil
 import traceback
 import time
 from pathlib import Path
 import subprocess
 
 print("importing external...")
+import matplotlib.pyplot as plt
+from PIL import Image
 import tqdm
 import torch
 import numpy as np
@@ -47,6 +50,129 @@ class SamdinoDataset(torch.utils.data.Dataset):
 
         return X, y
 
+def build_simple_samdino_dataset(
+    ds_path,
+    out,
+    num_workers=10,
+    dino_model_name="dinov2_vitb14_reg",
+    sam_model_name="vit_b",
+    device="cuda",
+    seed=0,
+    reset=False,
+):
+    """We build a simple dataset out of ADE20K. For each image we extract SAM masks. For each SAM mask we save an image containing the mask, the mask, a DINOv2+reg embedding, and the percentage of each class inside the mask."""
+    print('init...', end='\r')
+    if reset:
+        shutil.rmtree(out)
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    # set device
+    if (not device.startswith("cuda")) or (not torch.cuda.is_available()):
+        device = "cpu"
+    # seed
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    # set up data
+    print('data...', end='\r')
+    ds_path = Path(ds_path)
+    img_dir = ds_path / "images" / "training"
+    ann_dir = ds_path / "annotations" / "training"
+    img_files = sorted(img_dir.glob("*.jpg"))
+    ann_files = sorted(ann_dir.glob("*.png"))
+    assert len(img_files) == len(
+        ann_files
+    ), "Mismatched number of images and annotations"
+    assert (img_files[0].stem == ann_files[0].stem) and (
+        img_files[-1].stem == ann_files[-1].stem
+    ), "Mismatched files"
+    samples = list(zip(img_files, ann_files))
+
+    # set up sam
+    print('sam...', end='\r')
+    sam = sam_model_registry[sam_model_name](checkpoint="sam_vit_b_01ec64.pth").to(
+        device
+    )
+    mask_generator = SamAutomaticMaskGenerator(
+        sam, pred_iou_thresh=0.7, stability_score_thresh=0.8, min_mask_region_area=7 * 7
+    )
+    # set up dino
+    print('dino...', end='\r')
+    dino = torch.hub.load("facebookresearch/dinov2", dino_model_name).to(device)
+    for param in dino.parameters():
+        param.requires_grad = False
+
+    # params for mean std normalization
+    mean = torch.tensor([123.675, 116.28, 103.53]).view(1, 3, 1, 1).to(device)
+    std = torch.tensor([58.395, 57.12, 57.375]).view(1, 3, 1, 1).to(device)
+
+
+    # 1. generate masks, 2. extract bboxes, 3. generate image crops, 4. generate mask crops, 5. generate targets, 6. create DINOv2reg embeddings, 7. save sample.
+    for idx in tqdm.tqdm(range(len(samples))):
+        img_path, ann_path = samples[idx]
+        img = np.array(Image.open(img_path).convert("RGB"))
+        ann = torch.from_numpy(np.array(Image.open(ann_path)))
+        # handle background as in mmseg
+        ann[ann == 0] = 255
+        ann = ann - 1
+        ann[ann == 254] = 255
+
+
+
+        print(f'generating {idx}...', end='\r')
+        # 1. generate masks
+        masks = mask_generator.generate(img)
+        # 2. extract bboxes
+        bboxes = [m['bbox'] for m in masks]
+        bboxes = [(max(bbox[0]-bbox[2]//8,0), max(bbox[1]-bbox[3]//8, 0), min(bbox[2]+bbox[2]//4, img.shape[1]), min(bbox[3]+bbox[3]//4, img.shape[0])) for bbox in bboxes]
+        # 3. image crops
+        img_crops = [img[bbox[1]:bbox[1]+bbox[3], bbox[0]:bbox[0]+bbox[2]] for bbox in bboxes]
+        # 4. masks and crops
+        segs = [m["segmentation"] for m in masks]
+        mask_crops = [seg[bbox[1]:bbox[1]+bbox[3], bbox[0]:bbox[0]+bbox[2]] for seg, bbox in zip(segs, bboxes)]
+
+        # 5. generate targets
+        targets = []
+        for mask in segs:
+            labels_in_mask = ann[mask]
+            area_per_label = torch.histc(labels_in_mask.float(), bins=150, min=0, max=149)
+            area_per_label = area_per_label / area_per_label.sum()
+            targets.append(area_per_label)
+
+        # 6. DINOv2reg embeddings
+        emb = []
+        with torch.no_grad():
+            for img_crop in img_crops:
+                pad_h = 14 - img_crop.shape[0] % 14
+                pad_w = 14 - img_crop.shape[1] % 14
+                crop = np.pad(
+                    img_crop,
+                    ((0, pad_h), (0, pad_w), (0, 0)),
+                    mode="constant",
+                    constant_values=0,
+                )
+                dino_feats = dino.forward_features(
+                    (torch.from_numpy(crop).permute(2, 0, 1)[None].float().to(device) - mean) / std, 
+                )
+                emb.append(dino_feats)
+
+        # 7. save sample
+        sample = {
+            "img_crops": img_crops,
+            "mask_crops": mask_crops,
+            "targets": targets,
+            "emb": emb,
+        }
+
+        breakpoint()
+        plt.imsave('tmp0.png', img)
+        for idx in range(len(img_crops)):
+            plt.imsave('tmp1.png', img_crops[idx])
+            plt.imsave('tmp2.png', mask_crops[idx])
+            print(np.argsort(np.array(targets[idx]))[::-1][:5])
+
+        # np.save(out / f"sample_{str(idx).zfill(5)}.npy", sample)
+
+
 
 def build_samdino_dataset(
     ds_path,
@@ -61,7 +187,6 @@ def build_samdino_dataset(
     reset=False,
 ):
     if reset:
-        import shutil
 
         shutil.rmtree(out)
     out = Path(out)
@@ -170,6 +295,122 @@ class BNLinear(torch.nn.Module):
         return self.linear(self.bn(x))
 
 
+
+
+
+def val_oracle(val_ds_path, sam_model_name='vit_b', val_only_n=2000, vis=False, device='cuda', effvit=False):
+    # set device
+    if (not device.startswith("cuda")) or (not torch.cuda.is_available()):
+        device = "cpu"
+    ds_val = ADE20K(val_ds_path, split="val")
+    # set up sam
+    if not effvit:
+        sam = sam_model_registry[sam_model_name](checkpoint="sam_vit_b_01ec64.pth").to(
+            device
+        ).eval()
+        mask_generator = SamAutomaticMaskGenerator(
+            sam, pred_iou_thresh=0.7, stability_score_thresh=0.8, min_mask_region_area=7 * 7
+        )
+    else:
+        # segment anything
+        from efficientvit.sam_model_zoo import create_sam_model
+        from efficientvit.efficientvit.models.efficientvit.sam import EfficientViTSamAutomaticMaskGenerator
+        efficientvit_sam = create_sam_model(
+        name="l2", weight_url="efficientvit/assets/checkpoints/sam/l2.pt",
+        )
+        efficientvit_sam = efficientvit_sam.to(device).eval()
+        mask_generator = EfficientViTSamAutomaticMaskGenerator(efficientvit_sam, pred_iou_thresh=0.7, stability_score_thresh=0.8, min_mask_region_area=7*7)
+    print("Validating...")
+    intersections, unions = [], []
+    intersections2, unions2 = [], []
+    # for val_sample_ind in tqdm.tqdm(range(len(ds_val))):
+    val_st = time.time()
+    for val_sample_ind in range(len(ds_val)):
+        if val_sample_ind == val_only_n:
+            break
+        print(f'{val_sample_ind+1}/{len(ds_val)} loading data'+' '*20, end='\r')
+
+        img, ann = ds_val[val_sample_ind]
+        H, W = img.shape[:2]
+        ann = torch.from_numpy(ann).to(device)
+        print(f'{val_sample_ind+1}/{len(ds_val)} sam generator'+' '*20, end='\r')
+        masks = [
+            m["segmentation"]
+            for m in mask_generator.generate(img.astype(np.uint8))
+        ]
+        masks = np.stack(masks)
+
+
+        if vis:
+            print(f'{val_sample_ind+1}/{len(ds_val)} visualizing'+' '*20, end='\r')
+            if Path('vis').exists():
+                shutil.rmtree('vis')
+                Path('vis').mkdir()
+
+            Image.fromarray(img.astype(np.uint8)).save('vis/img.png')
+            masks_intersection = np.sum(masks[:, None] * masks[None], axis=(2,3))
+            masks_union = np.sum(masks[:, None]*1 + masks[None], axis=(2,3)) - masks_intersection
+            masks_overlap = masks_intersection / masks_union
+            current_idx, remaining_idx, vis_idx = 0, set(list(range(len(masks)))), 0
+            while len(remaining_idx):
+                Image.fromarray(masks[current_idx]).save(f"vis/mask_{str(vis_idx).zfill(len(str(len(masks))))}_{current_idx}.png")
+                vis_idx += 1
+                remaining_idx.remove(current_idx)
+                masks_overlap[:, current_idx] = 0
+                for new_idx in np.argsort(masks_overlap[current_idx])[::-1]:
+                    if new_idx in remaining_idx:
+                        break
+                current_idx = new_idx
+        masks = torch.from_numpy(masks).to(device)
+
+        print(f'{val_sample_ind+1}/{len(ds_val)} target computation'+' '*20, end='\r')
+        targets = []
+        for m_ind, mask in enumerate(masks):
+            labels_in_mask = ann[mask]
+            area_per_label = torch.histc(
+                labels_in_mask.float(), bins=150, min=0, max=149
+            )
+            denom = area_per_label.sum()
+            area_per_label = area_per_label / denom if denom else area_per_label
+            targets.append(area_per_label)
+        pred_areas = torch.stack(targets)
+
+        print(f'{val_sample_ind+1}/{len(ds_val)} prediction computation'+' '*20, end='\r')
+        pred = torch.zeros((150, H, W)).to(device)
+        pred_maj = torch.zeros((150, H, W)).to(device)
+        for m_ind in range(len(masks)):
+            mask = masks[m_ind]
+            pred[:, mask] += pred_areas[m_ind].view(
+                150, 1
+            )  # add the rel freq of each class in those pixels
+            if (pred_areas[m_ind] > 0).any():
+                pred_maj[torch.argmax(pred_areas[m_ind]), mask] += 1  # just sum masks, each mask classified as their majority class
+
+        print(f'{val_sample_ind+1}/{len(ds_val)} score computation'+' '*20, end='\r')
+        intersection, union, _, _ = intersect_and_union(
+            torch.argmax(pred, dim=0), ann, 150, 255
+        )
+        intersection_maj, union_maj, _, _ = intersect_and_union(
+            torch.argmax(pred_maj, dim=0), ann, 150, 255
+        )
+        intersections.append(intersection)
+        unions.append(union)
+        intersections2.append(intersection_maj)
+        unions2.append(union_maj)
+        IoU_per_class = torch.stack(intersections).sum(0) / torch.stack(
+            unions
+        ).sum(0)
+        IoU_per_class2 = torch.stack(intersections2).sum(0) / torch.stack(
+            unions2
+        ).sum(0)
+        mIoU = torch.nanmean(IoU_per_class)
+        mIoU2 = torch.nanmean(IoU_per_class2)
+        print('Area oracle mIoU:', mIoU, 'Maj oracle mIoU', mIoU2, 'eta (s):', (time.time()-val_st)/(val_sample_ind+1)*len(ds_val))
+    print('Oracle final mIoU (area-based):', mIoU)
+    print('Oracle final mIoU (majority-based):', mIoU2)
+
+    
+
 def main(
     ds_path,
     val_ds_path,
@@ -254,7 +495,7 @@ def main(
     past_ious, finish = [], False
     while not finish:
         for sample in dl:
-            if iter_n and (iter_n % val_every == 0):
+            if (iter_n % val_every == 0):
                 val_st = time.time()
                 model.eval()
                 with torch.no_grad():
@@ -271,7 +512,26 @@ def main(
                             m["segmentation"]
                             for m in mask_generator.generate(img.astype(np.uint8))
                         ]
-                        masks = torch.from_numpy(np.stack(masks)).to(device)
+                        masks = np.stack(masks)
+                        breakpoint()
+                        from PIL import Image
+                        Image.fromarray(img.astype(np.uint8)).save('vis/img.png')
+                        masks_intersection = np.sum(masks[:, None] * masks[None], axis=(2,3))
+                        masks_union = np.sum(masks[:, None]*1 + masks[None], axis=(2,3)) - masks_intersection
+                        masks_overlap = masks_intersection / masks_union
+                        current_idx, remaining_idx, vis_idx = 0, set(list(range(len(masks)))), 0
+                        while len(remaining_idx):
+                            Image.fromarray(masks[current_idx]).save(f"vis/mask_{str(vis_idx).zfill(len(str(len(masks))))}_{current_idx}.png")
+                            vis_idx += 1
+                            remaining_idx.remove(current_idx)
+                            masks_overlap[:, current_idx] = 0
+                            for new_idx in np.argsort(masks_overlap[current_idx])[::-1]:
+                                if new_idx in remaining_idx:
+                                    break
+                            current_idx = new_idx
+                        masks = torch.from_numpy(masks).to(device)
+
+
                         ds_masks = torch.nn.functional.interpolate(
                             masks[:, None].float(), size=(H // 14, W // 14), mode="area"
                         )
@@ -362,6 +622,55 @@ def main(
     # completed!
     (Path(writer.log_dir) / "completed").touch()  # write completed file
 
+def visualize_simple():
+    import matplotlib.pyplot as plt
+    dspath = Path("simpledinosamds")
+    for sample_path in sorted(dspath.glob('*.npy')):
+        sample = np.load(sample_path, allow_pickle=True).item()
+        crops = sample["img_crops"]
+        mask_crops = sample["mask_crops"]
+        targets = sample["targets"]
+        for idx in range(len(crops)):
+            plt.imsave('tmp1.png', crops[idx])
+            plt.imsave('tmp2.png', mask_crops[idx])
+            print(np.argsort(np.array(targets[idx]))[::-1][:5])
+            breakpoint()
+
+class SimpleSamdinoDataset(torch.utils.data.Dataset):
+    def __init__(self, dspath):
+        dspath = Path(dspath)
+        self.samples = sorted(dspath.glob('*.npy'))
+
+    def __getitem__(self, idx):
+        sample = np.load(self.samples[idx], allow_pickle=True).item()
+        return sample
+
+    def __len__(self):
+        return len(self.samples)
+
+def train_simple_sam_classifier(n_epochs=12):
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # set up dino
+    dino = torch.hub.load("facebookresearch/dinov2", 'dinov2_vitb14_reg').to(device)
+    for param in dino.parameters():
+        param.requires_grad = False
+
+    # params for mean std normalization
+    mean = torch.tensor([123.675, 116.28, 103.53]).view(1, 3, 1, 1).to(device)
+    std = torch.tensor([58.395, 57.12, 57.375]).view(1, 3, 1, 1).to(device)
+
+    writer = SummaryWriter()
+    ds = SimpleSamdinoDataset('simpleds')
+    dl = torch.utils.data.DataLoader(ds, batch_size=1, shuffle=True)
+    global_step = 0
+    for epoch in range(n_epochs):
+        for sample in dl:
+            breakpoint()
+
+    
+
 
 if __name__ == "__main__":
-    Fire({"build": build_samdino_dataset, "train": main})
+    Fire({"simple": build_simple_samdino_dataset, "build": build_samdino_dataset, "train": main, "oracle": val_oracle, "vis":visualize_simple, "samcls": train_simple_sam_classifier})
+    # use `python train_samdino.py simple` to generate the dataset
+    # use `python train_samdino.py samcls` to train a sam classifier
