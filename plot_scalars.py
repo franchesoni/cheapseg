@@ -24,6 +24,16 @@ def main(scalars_path, out_path='scalars.png', log=False):
     ax1.plot(train_steps, train_losses, 'b-', label='train loss')
     ax1.set_xlabel('Steps')
     ax1.set_ylabel('Train Loss', color='b')
+    ax1.tick_params(axis='y', labelcolor='b')
+
+    # Customize the primary y-axis to show original train losses values
+    if log:
+        original_ticks = np.linspace(min(train_losses), max(train_losses), num=10)
+        original_labels = np.round(np.exp(original_ticks), 2)
+        ax1.set_yticks(original_ticks)
+        ax1.set_yticklabels(original_labels)
+        ax1.set_ylabel('Train Loss', color='b')
+        ax1.tick_params(axis='y', labelcolor='b')
 
     ax2 = ax1.twinx()
     ax2.plot(val_steps, val_mious, 'r-', label='val mIoU')
