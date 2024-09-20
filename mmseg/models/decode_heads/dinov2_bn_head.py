@@ -35,7 +35,10 @@ class BNHead(BaseDecodeHead):
         # print("inputs", [i.shape for i in inputs])
         x = self._transform_inputs(inputs)
         # print("x", x.shape)
-        feats = self.bn(x)
+        if x.shape[0] > 1:  # batch norm breaks with batch size 1
+            feats = self.bn(x)
+        else:
+            feats = x
         # print("feats", feats.shape)
         return feats
 
@@ -46,6 +49,10 @@ class BNHead(BaseDecodeHead):
         Returns:
             Tensor: The transformed inputs
         """
+        # we add this extra pathway to process individual feature vectors
+        if isinstance(inputs, torch.Tensor) and len(inputs.shape) == 2:  # (B, F)
+            return inputs[:, :, None, None]  # (B, F, 1, 1)
+
 
         if self.input_transform == "resize_concat":
             # accept lists (for cls token)
@@ -88,3 +95,90 @@ class BNHead(BaseDecodeHead):
         output = self._forward_feature(inputs)
         output = self.cls_seg(output)
         return output
+
+
+@MODELS.register_module()
+class NormedLinear(BaseDecodeHead):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        assert self.in_channels == self.channels
+        self.conv_seg = nn.utils.parametrizations.weight_norm(nn.Conv2d(self.channels, self.out_channels, kernel_size=1, bias=False))
+        with torch.no_grad():
+            self.conv_seg.parametrizations.weight.original0.fill_(1.0)
+        self.conv_seg.parametrizations.weight.original0.requires_grad = False
+        self.bn = lambda x: x
+
+
+class DynamicTensor:
+    def __init__(self, initial_tensor):
+        assert initial_tensor.ndim == 1 or initial_tensor.ndim == 2, "Tensor must be 1D or 2D"
+        self.tensor = initial_tensor
+        self.current_len = len(self.tensor)
+        self.current_buffer_size = 2**torch.log2(torch.tensor(self.current_len)).ceil().int().item() if self.current_len > 0 else 1
+        if self.current_buffer_size == 1 and self.current_len == 0:
+            self.tensor = torch.empty(1, *self.tensor.shape[1:], dtype=self.tensor.dtype)
+
+    def append(self, x):
+        # Ensure `x` has compatible shape
+        if self.tensor.ndim == 2:
+            assert x.shape == self.tensor.shape[1:], f"Expected shape {self.tensor.shape[1:]}, got {x.shape}"
+        elif self.tensor.ndim == 1:
+            assert x.shape == (), "Expected scalar for 1D tensor"
+
+        if self.current_len == self.current_buffer_size:
+            # Allocate twice the memory
+            new_buffer = torch.zeros(self.current_buffer_size * 2, *self.tensor.shape[1:], dtype=self.tensor.dtype)
+            new_buffer[:self.current_len] = self.tensor
+            self.tensor = new_buffer
+            self.current_buffer_size *= 2
+        
+        self.tensor[self.current_len] = x
+        self.current_len += 1
+
+    def get_tensor(self):
+        return self.tensor[:self.current_len]
+
+    def __len__(self):
+        return self.current_len
+
+    def to(self, *args, **kwargs):
+        self.tensor = self.tensor.to(*args, **kwargs)
+        return self
+
+
+@MODELS.register_module()
+class KNNHead:
+    def __init__(self, **kwargs):
+        self.feats = DynamicTensor(torch.empty((0, 768)))
+        self.labels = []
+        self.align_corners = False
+        self.num_classes = 150
+        self.out_channels = 150
+
+    def _stack_batch_gt(self, *args, **kwargs):
+        return BaseDecodeHead._stack_batch_gt(None, *args, **kwargs)
+
+    def forward(self, inputs):
+        if len(self.feats) == 0:
+            # no knowledge
+            return torch.zeros(1, self.num_classes, *inputs.shape[2:], device=inputs.device)
+        # inputs is (1, F, H, W)
+        # feats is (N, F)
+        similarities = self.feats.get_tensor() @ inputs.reshape(768, -1)  # (N, H*W)
+        most_similar_vector_indices = torch.argmax(similarities, dim=0).reshape(*inputs.shape[2:])   # (H, W)
+        predicted_labels = torch.tensor(self.labels, device=inputs.device)[most_similar_vector_indices]  # (H, W)
+        prediction = torch.nn.functional.one_hot(predicted_labels, num_classes=self.num_classes)  # (h, w, c)
+        return prediction.permute(2, 0, 1).unsqueeze(0).float()
+        # 0.4611 at 14k 
+
+
+    def append(self, x, y):
+        self.feats.append(x)
+        self.feats.to(x.device)
+        self.labels.append(y)
+
+    def init_weights(self, *args, **kwargs):
+        pass
+
+
+
