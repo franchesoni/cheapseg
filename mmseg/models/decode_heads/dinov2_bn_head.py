@@ -148,12 +148,13 @@ class DynamicTensor:
 
 @MODELS.register_module()
 class KNNHead:
-    def __init__(self, **kwargs):
+    def __init__(self, k=1, **kwargs):
         self.feats = DynamicTensor(torch.empty((0, 768)))
         self.labels = []
         self.align_corners = False
         self.num_classes = 150
         self.out_channels = 150
+        self.k = k
 
     def _stack_batch_gt(self, *args, **kwargs):
         return BaseDecodeHead._stack_batch_gt(None, *args, **kwargs)
@@ -163,13 +164,19 @@ class KNNHead:
             # no knowledge
             return torch.zeros(1, self.num_classes, *inputs.shape[2:], device=inputs.device)
         # inputs is (1, F, H, W)
+        _, F, H, W = inputs.shape
         # feats is (N, F)
-        similarities = self.feats.get_tensor() @ inputs.reshape(768, -1)  # (N, H*W)
-        most_similar_vector_indices = torch.argmax(similarities, dim=0).reshape(*inputs.shape[2:])   # (H, W)
-        predicted_labels = torch.tensor(self.labels, device=inputs.device)[most_similar_vector_indices]  # (H, W)
+        similarities = self.feats.get_tensor() @ inputs.reshape(F, -1)  # (N, H*W)
+        top_k_similarities, top_k_indices = torch.topk(similarities, self.k, dim=0)
+        top_k_labels = torch.tensor(self.labels, device=inputs.device)[top_k_indices]  # (k, HW)
+        top_k_labels = top_k_labels.reshape(self.k, H, W)
+        predicted_labels, _ = torch.mode(top_k_labels, dim=0)  # (H, W)
+
         prediction = torch.nn.functional.one_hot(predicted_labels, num_classes=self.num_classes)  # (h, w, c)
         return prediction.permute(2, 0, 1).unsqueeze(0).float()
-        # 0.4611 at 14k 
+
+        # results:
+        # 0.4611 err rate at 14k 
 
 
     def append(self, x, y):

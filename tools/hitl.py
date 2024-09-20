@@ -120,6 +120,7 @@ def main():
     print('starting training')
     error_rates = []
     plot = False
+    tag = '_ksqrt'
 
     while runner.train_loop._iter < runner.train_loop._max_iters and not runner.train_loop.stop_training:
         print('iter', runner.train_loop._iter, ' '*20, end='\r')
@@ -195,6 +196,7 @@ def main():
             sample_x = feats[0, :, patch_loc[0], patch_loc[1]]  # [768]
             sample_y = int(seg_label[click[0], click[1]])  # [1]
             runner.model.decode_head.append(sample_x, sample_y)
+            runner.model.decode_head.k = int(len(runner.model.decode_head.labels)**0.5)
 
             # LOGGING
             if plot:
@@ -202,7 +204,8 @@ def main():
                 plt.imsave('sample_gt.png', seg_label.cpu().numpy())
                 plt.imsave('sample_misclassified.png', misclassified.cpu().numpy())
 
-            if runner.train_loop._iter % 100 == 0:
+            if runner.train_loop._iter % 500 == 0:
+                np.save(f'sample_error_rate{tag}.npy', np.array(error_rates))
                 plt.figure()
                 plt.plot(error_rates)
                 plt.xlabel('iteration')
