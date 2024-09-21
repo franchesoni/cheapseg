@@ -148,4 +148,5 @@ class SegDataPreProcessor(BaseDataPreprocessor):
             else:
                 inputs = torch.stack(inputs, dim=0)
 
-        return dict(inputs=inputs, data_samples=data_samples)
+        return data | dict(inputs=inputs, data_samples=data_samples)
+        
