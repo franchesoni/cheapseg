@@ -103,6 +103,7 @@ class PackSegInputs(BaseTransform):
                 img_meta[key] = results[key]
         data_sample.set_metainfo(img_meta)
         packed_results['data_samples'] = data_sample
+        packed_results['original_pipeline'] = results  # add original pipeline to packed results
 
         return packed_results
 
