@@ -320,11 +320,13 @@ class RandomCrop(BaseTransform):
 
         img = results['img']
         crop_bbox = self.crop_bbox(results)
-        results['crop_bbox'] = crop_bbox  # added to allow undoing
-        results['img_shape_before_crop'] = results['img_shape']  # added to allow undoing
 
         # crop the image
         img = self.crop(img, crop_bbox)
+
+        results['crop_bbox'] = crop_bbox  # added to allow undoing
+        results['img_shape_before_crop'] = results['img_shape']  # added to allow undoing
+        results['img_shape_after_crop'] = img.shape[:2]  # added to allow undoing
 
         # crop semantic seg
         for key in results.get('seg_fields', []):
