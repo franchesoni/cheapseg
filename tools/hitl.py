@@ -102,34 +102,24 @@ def main():
     clsds = CLSDataset()
     runner = Runner.from_cfg(cfg)
     # we call `train` to init everything, but we remove the last part of the train fn to use our custom loop instead
-    def new_run_train_loop_fn(self): pass
-    runner.run_train_loop = new_run_train_loop_fn.__get__(runner, type(runner))
+    def dummy_run_loop_fn(self): pass
+    runner.run_train_loop = dummy_run_loop_fn.__get__(runner, type(runner))
     runner.train()
     # now we run our own `run_train_loop` 
     runner.call_hook('before_train')
     runner.call_hook('before_train_epoch')
-    if runner.train_loop._iter > 0:
-        print_log(
-            f'Advance dataloader {runner.train_loop._iter} steps to skip data '
-            'that has already been trained',
-            logger='current',
-            level=logging.WARNING)
-        for _ in range(runner.train_loop._iter):
-            next(runner.train_loop.dataloader_iterator)
-
     print('starting training')
     error_rates = []
-    plot = False
-    tag = '_ksqrt'
+    plot = True
+    tag = 'debug'
 
-    while runner.train_loop._iter < runner.train_loop._max_iters and not runner.train_loop.stop_training:
-        print('iter', runner.train_loop._iter, ' '*20, end='\r')
+    for idx, batch in enumerate(runner.test_dataloader):  # in fact this loads train data without augmentation
         runner.model.train()
-
         batch = next(runner.train_loop.dataloader_iterator)
-        # runner.train_loop.run_iter(data_batch)
+
+        # substitute: runner.train_loop.run_iter(data_batch)
         runner.call_hook('before_train_iter', batch_idx=runner.train_loop._iter, data_batch=batch)
-        # outputs = self.runner.model.train_step(
+        # substitute: outputs = self.runner.model.train_step(
         #     data_batch, optim_wrapper=self.runner.optim_wrapper)
         with torch.no_grad():
             # IGNORE
@@ -186,10 +176,12 @@ def main():
             misclassified[seg_label==255] = False  # ignore
             error_rate = misclassified.float().sum() / (518*518 - (seg_label==255).sum())
             error_rates.append(float(error_rate))
-            print('error rate', np.mean(error_rates))
+            print('iter', runner.train_loop._iter, 'error rate', np.mean(error_rates), end='\r')
             # sample a random click from the misclassified region
             err_region = misclassified.nonzero()
-            assert len(err_region), 'no misclassified region found'
+            if len(err_region) == 0:
+                print('no cls error region found')
+                continue
             click = err_region[torch.randint(0, err_region.shape[0], (1,))[0]]
             # get data at the click (feature, ground truth)
             patch_loc = click[0] // 14, click[1] // 14  # downsample according to dino patch size
@@ -240,11 +232,12 @@ def main():
         runner.call_hook('after_train_iter', batch_idx=runner.train_loop._iter, data_batch=batch, outputs=log_vars)
         runner.train_loop._iter += 1
 
-        # runner.train_loop._decide_current_val_interval()
-        # if ((runner.val_loop is not None)  and (runner.train_loop._iter >= runner.train_loop.val_begin)
-        #         and (runner.train_loop._iter % runner.train_loop.val_interval == 0
-        #                 or runner.train_loop._iter == runner.train_loop._max_iters or (runner.train_loop._iter in [2**i for i in range(5, 20)]))):
-        #     runner.val_loop.run()
+        runner.train_loop._decide_current_val_interval()
+        if ((runner.val_loop is not None)  and (runner.train_loop._iter >= runner.train_loop.val_begin)
+                and (runner.train_loop._iter % runner.train_loop.val_interval == 0
+                        or runner.train_loop._iter == runner.train_loop._max_iters or (runner.train_loop._iter in [8**i for i in range(2, 20)]))):
+            runner.val_loop.run()
+            print('finished validating at step', runner.train_loop._iter)
 
     runner.call_hook('after_train_epoch')
     runner.call_hook('after_train')
@@ -252,5 +245,26 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+# 09/21 00:17:58 - mmengine - INFO - Iter(val) [2000/2000]    aAcc: 41.0800  mIoU: 2.2400  mAcc: 4.2600  data_time: 0.0018  time: 0.0268
+# finished validating at step 64
+
+# 09/21 00:19:02 - mmengine - INFO - Iter(val) [2000/2000]    aAcc: 57.2100  mIoU: 7.2900  mAcc: 11.2600  data_time: 0.0017  time: 0.0271
+# finished validating at step 512
+
+# 09/21 00:21:19 - mmengine - INFO - Iter(val) [2000/2000]    aAcc: 66.8600  mIoU: 15.6100  mAcc: 20.7100  data_time: 0.0026  time: 0.0292
+# finished validating at step 4096
+
+# 09/21 00:06:40 - mmengine - INFO - Iter(val) [2000/2000]    aAcc: 68.4300  mIoU: 19.4800  mAcc: 25.0800  data_time: 0.0022  time: 0.0289
+# finished validating at step 8000
+
+#  aAcc: 70.0600  mIoU: 23.9700  mAcc: 30.5200  data_time: 0.0019  time: 0.0300
+# finished validating at step 16000
+
+# 09/21 00:15:12 - mmengine - INFO - Iter(val) [2000/2000]    aAcc: 70.8000  mIoU: 26.7400  mAcc: 33.9800  data_time: 0.0021  time: 0.0315
+# finished validating at step 24000
+
 
 
