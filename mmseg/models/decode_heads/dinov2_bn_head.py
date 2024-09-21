@@ -178,6 +178,10 @@ class KNNHead:
         # results:
         # 0.4611 err rate at 14k 
 
+    def predict(self, feats, *args):
+        feats = feats[3] / torch.norm(feats[3], dim=1, keepdim=True)  # normalize [1, 768, 37, 37]
+        prediction = self.forward(feats)
+        return torch.nn.functional.interpolate(prediction, size=(518, 518), mode='bilinear', align_corners=False)
 
     def append(self, x, y):
         self.feats.append(x)
