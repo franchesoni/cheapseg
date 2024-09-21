@@ -76,6 +76,21 @@ class CLSDataset(torch.utils.data.Dataset):
         self.gt.append(gt)
         return self
 
+def compute_augclick(click, augcfg, orig_scale_factor):
+    scale_factor_data = np.array(orig_scale_factor).reshape(2)  # the one used to generate the current image (no aug)
+    augclick = click.cpu() / scale_factor_data   # click on original image
+    scale_factor_aug = np.array(augcfg['scale_factor']).reshape(2)
+    augclick = augclick * scale_factor_aug  # click on augmented image
+    crop_bbox = augcfg['crop_bbox']
+    if augclick[0] < crop_bbox[0] or augclick[1] < crop_bbox[2] or augclick[0] > crop_bbox[1] or augclick[1] > crop_bbox[3]:
+        return None
+    augclick[0], augclick[1] = augclick[0] - crop_bbox[0], augclick[1] - crop_bbox[2]  # click on cropped image
+    shape_after_crop = augcfg['img_shape_after_crop']
+    augclick[1] = shape_after_crop[1] - augclick[1]  if augcfg['flip'] else augclick[1]  # flip y
+    assert augclick[0] >= 0 and augclick[1] >= 0
+    return augclick
+
+
 def main():
     args = parse_args()
 
@@ -112,10 +127,10 @@ def main():
     error_rates = []
     plot = True
     tag = 'debug'
+    n_aug = 8
 
     for idx, batch in enumerate(runner.test_dataloader):  # in fact this loads train data without augmentation
         runner.model.train()
-        batch = next(runner.train_loop.dataloader_iterator)
 
         # substitute: runner.train_loop.run_iter(data_batch)
         runner.call_hook('before_train_iter', batch_idx=runner.train_loop._iter, data_batch=batch)
@@ -183,6 +198,44 @@ def main():
                 print('no cls error region found')
                 continue
             click = err_region[torch.randint(0, err_region.shape[0], (1,))[0]]
+            # generate naug augmented versions of the input that contain the click
+            sample_idx = batch['original_pipeline']['sample_idx'][0]
+            n = 0
+            augsamples, augclicks = [], []
+            while n < n_aug:
+                # generate one image
+                augsample = runner.train_dataloader.dataset[sample_idx]
+                # for the dataset return value to be equivalent to usual train batch we need nest a list 
+                augsample = augsample | {'inputs': [augsample['inputs']], 'data_samples': [augsample['data_samples']]}
+                augsample = runner.model.data_preprocessor(augsample, True)
+
+                # geometric pipeline is: resize, pad
+                # for aug is: random resize, random crop, random flip, pad
+                augclick = compute_augclick(click, augsample['original_pipeline'], data_batch['original_pipeline']['scale_factor'])
+                if augclick is None:
+                    continue
+
+                augsamples.append(augsample['inputs'][0])
+                augclicks.append(augclick)
+                n += 1
+                
+            augsamples = torch.stack(augsamples)
+            feats = list(runner.model.extract_feat(augsamples))
+            feats = feats[3] / torch.norm(feats[3], dim=1, keepdim=True)  # normalize [B, 768, 37, 37]
+            breakpoint()
+            prediction = runner.model.decode_head.forward(feats)
+
+
+
+
+
+
+            # convert the click for the image
+            # check if it's inside
+
+            # extract features for each
+            # visualize
+
             # get data at the click (feature, ground truth)
             patch_loc = click[0] // 14, click[1] // 14  # downsample according to dino patch size
             sample_x = feats[0, :, patch_loc[0], patch_loc[1]]  # [768]
