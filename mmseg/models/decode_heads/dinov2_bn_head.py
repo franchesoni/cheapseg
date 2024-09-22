@@ -164,16 +164,16 @@ class KNNHead:
             # no knowledge
             return torch.zeros(1, self.num_classes, *inputs.shape[2:], device=inputs.device)
         # inputs is (1, F, H, W)
-        _, F, H, W = inputs.shape
+        B, F, H, W = inputs.shape
         # feats is (N, F)
-        similarities = self.feats.get_tensor() @ inputs.reshape(F, -1)  # (N, H*W)
+        similarities = self.feats.get_tensor() @ inputs.permute(1, 0, 2, 3).reshape(F, -1)  # (N, BHW)
         top_k_similarities, top_k_indices = torch.topk(similarities, self.k, dim=0)
-        top_k_labels = torch.tensor(self.labels, device=inputs.device)[top_k_indices]  # (k, HW)
-        top_k_labels = top_k_labels.reshape(self.k, H, W)
-        predicted_labels, _ = torch.mode(top_k_labels, dim=0)  # (H, W)
+        top_k_labels = torch.tensor(self.labels, device=inputs.device)[top_k_indices]  # (k, BHW)
+        top_k_labels = top_k_labels.reshape(self.k, B, H, W)
+        predicted_labels, _ = torch.mode(top_k_labels, dim=0)  # (B, H, W)
 
-        prediction = torch.nn.functional.one_hot(predicted_labels, num_classes=self.num_classes)  # (h, w, c)
-        return prediction.permute(2, 0, 1).unsqueeze(0).float()
+        prediction = torch.nn.functional.one_hot(predicted_labels, num_classes=self.num_classes)  # (B, H, W, C)
+        return prediction.permute(0, 3, 1, 2).float()
 
         # results:
         # 0.4611 err rate at 14k 
