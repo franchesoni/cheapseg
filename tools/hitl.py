@@ -81,13 +81,15 @@ def compute_augclick(click, augcfg, orig_scale_factor):
     augclick = click.cpu() / scale_factor_data   # click on original image
     scale_factor_aug = np.array(augcfg['scale_factor']).reshape(2)
     augclick = augclick * scale_factor_aug  # click on augmented image
+    augclick = torch.minimum(augclick, torch.tensor(augcfg['img_shape_before_crop']) - 1)  # clip to image size
     crop_bbox = augcfg['crop_bbox']
-    if augclick[0] < crop_bbox[0] or augclick[1] < crop_bbox[2] or augclick[0] > crop_bbox[1] or augclick[1] > crop_bbox[3]:
+    if augclick[0] < crop_bbox[0] or augclick[1] < crop_bbox[2] or augclick[0] >= crop_bbox[1] or augclick[1] >= crop_bbox[3]:
         return None
     augclick[0], augclick[1] = augclick[0] - crop_bbox[0], augclick[1] - crop_bbox[2]  # click on cropped image
     shape_after_crop = augcfg['img_shape_after_crop']
+    assert augclick[0] < shape_after_crop[0] and augclick[1] < shape_after_crop[1], f'click {augclick} not in {shape_after_crop}, augcfg {augcfg}, click {click}, scale_factor_data {scale_factor_data}'
     augclick[1] = shape_after_crop[1] - augclick[1]  if augcfg['flip'] else augclick[1]  # flip y
-    assert augclick[0] >= 0 and augclick[1] >= 0
+    assert augclick[0] >= 0 and augclick[1] >= 0, f'click {augclick} negative, augcfg {augcfg}'
     return augclick
 
 
@@ -125,15 +127,18 @@ def main():
     runner.call_hook('before_train_epoch')
     print('starting training')
     error_rates = []
-    plot = True
+    plot = False
     tag = 'debug'
     n_aug = 8
 
     for idx, batch in enumerate(runner.test_dataloader):  # in fact this loads train data without augmentation
+        if idx > 24500:
+            break
         runner.model.train()
 
         # substitute: runner.train_loop.run_iter(data_batch)
         runner.call_hook('before_train_iter', batch_idx=runner.train_loop._iter, data_batch=batch)
+        breakpoint()
         # substitute: outputs = self.runner.model.train_step(
         #     data_batch, optim_wrapper=self.runner.optim_wrapper)
         with torch.no_grad():
@@ -198,50 +203,44 @@ def main():
                 print('no cls error region found')
                 continue
             click = err_region[torch.randint(0, err_region.shape[0], (1,))[0]]
-            # generate naug augmented versions of the input that contain the click
-            sample_idx = batch['original_pipeline']['sample_idx'][0]
-            n = 0
-            augsamples, augclicks = [], []
-            while n < n_aug:
-                # generate one image
-                augsample = runner.train_dataloader.dataset[sample_idx]
-                # for the dataset return value to be equivalent to usual train batch we need nest a list 
-                augsample = augsample | {'inputs': [augsample['inputs']], 'data_samples': [augsample['data_samples']]}
-                augsample = runner.model.data_preprocessor(augsample, True)
 
-                # geometric pipeline is: resize, pad
-                # for aug is: random resize, random crop, random flip, pad
-                augclick = compute_augclick(click, augsample['original_pipeline'], data_batch['original_pipeline']['scale_factor'])
-                if augclick is None:
-                    continue
+            if n_aug > 0:
+                # generate naug augmented versions of the input that contain the click
+                sample_idx = batch['original_pipeline']['sample_idx'][0]
+                n = 0
+                augsamples, augclicks = [], []
+                while n < n_aug:
+                    # generate one image
+                    augsample = runner.train_dataloader.dataset[sample_idx]
+                    # for the dataset return value to be equivalent to usual train batch we need nest a list 
+                    augsample = augsample | {'inputs': [augsample['inputs']], 'data_samples': [augsample['data_samples']]}
+                    augsample = runner.model.data_preprocessor(augsample, True)
 
-                augsamples.append(augsample['inputs'][0])
-                augclicks.append(augclick)
-                n += 1
-                
-            augsamples = torch.stack(augsamples)
-            feats = list(runner.model.extract_feat(augsamples))
-            feats = feats[3] / torch.norm(feats[3], dim=1, keepdim=True)  # normalize [B, 768, 37, 37]
-            breakpoint()
-            prediction = runner.model.decode_head.forward(feats)
+                    # geometric pipeline is: resize, pad
+                    # for aug is: random resize, random crop, random flip, pad
+                    augclick = compute_augclick(click, augsample['original_pipeline'], data_batch['original_pipeline']['scale_factor'])
+                    if augclick is None:
+                        continue
 
-
-
-
-
-
-            # convert the click for the image
-            # check if it's inside
-
-            # extract features for each
-            # visualize
+                    augsamples.append(augsample['inputs'][0])
+                    augclicks.append(augclick)
+                    n += 1
+                    
+                augsamples = torch.stack(augsamples)
+                augfeats = list(runner.model.extract_feat(augsamples))
+                augfeats = augfeats[3] / torch.norm(augfeats[3], dim=1, keepdim=True)  # normalize [B, 768, 37, 37]
+            else:
+                augclicks = []
+                augfeats = torch.Tensor().to(feats.device)
 
             # get data at the click (feature, ground truth)
-            patch_loc = click[0] // 14, click[1] // 14  # downsample according to dino patch size
-            sample_x = feats[0, :, patch_loc[0], patch_loc[1]]  # [768]
             sample_y = int(seg_label[click[0], click[1]])  # [1]
-            runner.model.decode_head.append(sample_x, sample_y)
-            runner.model.decode_head.k = int(len(runner.model.decode_head.labels)**0.5)
+            for clk, ff in zip([click] + augclicks, list(torch.cat((feats, augfeats), dim=0))):
+                patch_loc = int(clk[0] // 14), int(clk[1] // 14)  # downsample according to dino patch size
+                sample_x = ff[:, patch_loc[0], patch_loc[1]]  # [768]
+                runner.model.decode_head.append(sample_x, sample_y)
+            if 'sqrt' in tag:
+                runner.model.decode_head.k = int((len(runner.model.decode_head.labels)/(n_aug+1))**0.5)
 
             # LOGGING
             if plot:
