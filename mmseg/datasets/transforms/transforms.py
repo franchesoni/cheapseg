@@ -1033,7 +1033,7 @@ class RandomFlip(MMCV_RandomFlip):
             if results.get(key, None) is not None:
                 results[key] = self._flip_seg_map(
                     results[key], direction=results['flip_direction']).copy()
-                results['swap_seg_labels'] = self.swap_seg_labels
+                # results['swap_seg_labels'] = self.swap_seg_labels
 
 
 @TRANSFORMS.register_module()
