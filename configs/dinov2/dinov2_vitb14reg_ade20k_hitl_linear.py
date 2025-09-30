@@ -19,7 +19,8 @@ model = dict(
 )
 
 WORKERS = 0
-data_root = 'data/ade/ADEChallengeData2016_ds_1'
+# data_root = 'data/ade/ADEChallengeData2016_ds_1'
+data_root = 'data/ade/ADEChallengeData2016_ds_256'
 custom_hooks = []
 train_dataloader = dict(batch_size=1, dataset=dict(data_root=data_root), num_workers=WORKERS, persistent_workers=False)
 

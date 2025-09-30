@@ -40,6 +40,8 @@ def main(work_dirs_dir='work_dirs'):
         linestyle = ["-", "--", ":", "-."][model_idx]
         plt.plot(20210 / np.array(list(sorted_entries.keys())), sorted_entries.values(), linestyle, label=name_map[model_name], color='k')
         plt.plot(20210 / np.array(list(sorted_entries.keys())), sorted_entries.values(), '.', color='k')
+        if model_name == 'dinov2_vitb14reg':
+            breakpoint()
 
     plt.ylabel('ADE20k val mIoU')
     # plt.xlabel('$\log_2$(dataset downsampling factor)')

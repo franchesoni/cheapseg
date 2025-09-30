@@ -83,4 +83,7 @@ the transforms are:
         
 
 
-
+e0 "aAcc": 68.47, "mIoU": 21.72
+e1 "aAcc": 68.68, "mIoU": 21.67
+e2 "aAcc": 68.62, "mIoU": 21.59
+e3 aAcc: 68.5900  mIoU: 21.6000

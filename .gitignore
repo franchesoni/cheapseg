@@ -118,3 +118,8 @@ mmseg/.mim
 
 # Pytorch
 *.pth
+# outputs
+*.png
+*.npy
+events.out.tfevents*
+runs/**/completed
